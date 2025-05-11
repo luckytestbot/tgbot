@@ -1,0 +1,10 @@
+
+python-telegram-bot>=20.0
+telegram
+python-telegram-bot==20.0
+requests
+websockets
+aiohttp
+solana==0.18.0
+httpx
+pytz
