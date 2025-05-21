@@ -134,6 +134,15 @@ async def handle_token(data):
     symbol = data.get("symbol", "Brak symbolu")
     dev = data.get("traderPublicKey", "Brak dev'a")
 
+    initial_buy = data.get("initialBuy", 0)
+    total_supply = 1_000_000_000
+    initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
+
+    # Pomijamy dalszą obsługę jeśli initialBuy <= 1%
+    if initial_buy_percentage <= 1:
+        print(f"Initial buy {initial_buy_percentage:.2f}% <= 1%. Pomijam sprawdzanie w Helius.")
+        return
+
     now = datetime.datetime.now(datetime.UTC)
 
     # Sprawdzamy cache devów - czy ostatnie sprawdzenie było < 15 minut temu
@@ -153,11 +162,6 @@ async def handle_token(data):
         return
 
     display_count = token_count if token_count > 0 else 1
-
-    initial_buy = data.get("initialBuy", 0)
-    total_supply = 1_000_000_000
-    initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
-    formatted_initial_buy = f"{initial_buy_percentage:.2f}%"
 
     token_creation_utc = now
     token_creation_pl = token_creation_utc.astimezone(pytz.timezone("Europe/Warsaw"))
@@ -182,7 +186,7 @@ async def handle_token(data):
         f"*Data utworzenia:* {formatted_timestamp}\n"
         f"*Data ostatniej transakcji:* {formatted_last_tx} {emoji}\n"
         f"*Dev deployed:* {display_count}\n"
-        f"*Dev initial buy:* {formatted_initial_buy}"
+        f"*Dev initial buy:* {initial_buy_percentage:.2f}%"
     )
 
     await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown", disable_web_page_preview=True)
