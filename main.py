@@ -22,6 +22,11 @@ last_seen_cas_set = set()
 last_seen_cas_queue = deque(maxlen=MAX_CAS)
 last_seen_cas_lock = asyncio.Lock()
 
+# Cache devów i timestampów ostatniego sprawdzenia (adres dev -> datetime)
+dev_last_checked = {}
+dev_cache_lock = asyncio.Lock()
+CHECK_INTERVAL_SECONDS = 15 * 60  # 15 minut
+
 def format_simple_datetime(dt):
     return dt.strftime("%d-%m-%Y %H:%M")
 
@@ -35,7 +40,7 @@ async def get_token_count_by_creator(creator_address):
                 "creatorAddress": creator_address,
                 "onlyVerified": False,
                 "page": 1,
-                "limit": 50  # zmienione na 50 tokenów
+                "limit": 50  # pobieramy max 50 tokenów
             }
         }
         response = await asyncio.to_thread(
@@ -49,6 +54,8 @@ async def get_token_count_by_creator(creator_address):
         for asset in assets:
             if asset.get("interface") == "FungibleToken":
                 count += 1
+                # Logowanie dla debugu
+                print(f"Znaleziono token #{count} dla dev'a {creator_address}")
                 if count > 1:
                     return count
         return count
@@ -127,8 +134,20 @@ async def handle_token(data):
     symbol = data.get("symbol", "Brak symbolu")
     dev = data.get("traderPublicKey", "Brak dev'a")
 
+    now = datetime.datetime.now(datetime.UTC)
+
+    # Sprawdzamy cache devów - czy ostatnie sprawdzenie było < 15 minut temu
+    async with dev_cache_lock:
+        last_checked = dev_last_checked.get(dev)
+        if last_checked and (now - last_checked).total_seconds() < CHECK_INTERVAL_SECONDS:
+            print(f"Dev {dev} był sprawdzany mniej niż 15 minut temu. Pomijam Heliusa.")
+            return
+        dev_last_checked[dev] = now
+
     token_count = await get_token_count_by_creator(dev)
-    # Tylko jeśli dev ma mniej niż 1 token (czyli 0) sprawdzamy transakcje
+    print(f"Dev {dev} ma {token_count} tokenów.")
+
+    # Sprawdzamy, czy dev ma mniej niż 1 token (czyli 0)
     if token_count >= 1:
         print(f"Dev {dev} ma {token_count} tokenów (>=1). Ignoruję token.")
         return
@@ -140,7 +159,7 @@ async def handle_token(data):
     initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
     formatted_initial_buy = f"{initial_buy_percentage:.2f}%"
 
-    token_creation_utc = datetime.datetime.now(datetime.UTC)
+    token_creation_utc = now
     token_creation_pl = token_creation_utc.astimezone(pytz.timezone("Europe/Warsaw"))
     formatted_timestamp = format_simple_datetime(token_creation_pl)
 
