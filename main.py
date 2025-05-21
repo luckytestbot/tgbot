@@ -3,10 +3,10 @@ import websockets
 import json
 import datetime
 import pytz
-import time
 import requests
 from telegram import Bot
 import os
+from collections import deque
 
 # Dane dostępowe z ustawionych zmiennych środowiskowych
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -16,15 +16,15 @@ HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL")
 # Inicjalizacja bota Telegram
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Zbiór przechowujący już obsłużone tokeny (CA)
-last_seen_cas = set()
+# Ustawienia limitu i struktur danych do obsługi CA
+MAX_CAS = 1000
+last_seen_cas_set = set()
+last_seen_cas_queue = deque(maxlen=MAX_CAS)
 last_seen_cas_lock = asyncio.Lock()
 
-# Formatowanie daty
 def format_simple_datetime(dt):
     return dt.strftime("%d-%m-%Y %H:%M")
 
-# ✅ Zmodyfikowana funkcja do pobierania tokenów dev'a
 async def get_token_count_by_creator(creator_address):
     try:
         payload = {
@@ -35,50 +35,62 @@ async def get_token_count_by_creator(creator_address):
                 "creatorAddress": creator_address,
                 "onlyVerified": False,
                 "page": 1,
-                "limit": 2
+                "limit": 50  # zmienione na 50 tokenów
             }
         }
-        response = await asyncio.to_thread(requests.post, HELIUS_RPC_URL, json=payload, headers={"Content-Type": "application/json"})
+        response = await asyncio.to_thread(
+            requests.post, HELIUS_RPC_URL, json=payload, headers={"Content-Type": "application/json"}
+        )
         response.raise_for_status()
         data = response.json()
         assets = data.get("result", {}).get("items", [])
-        fungible_tokens = [asset for asset in assets if asset.get("interface") == "FungibleToken"]
-        return len(fungible_tokens)
+
+        count = 0
+        for asset in assets:
+            if asset.get("interface") == "FungibleToken":
+                count += 1
+                if count > 1:
+                    return count
+        return count
     except Exception as e:
         print(f"Błąd przy pobieraniu tokenów dev'a: {e}")
         return 999
 
-# ✅ Zmodyfikowana funkcja do pobierania transakcji (zawsze 50)
 async def get_oldest_transaction_time(dev_address):
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "helius",
-            "method": "getSignaturesForAddress",
-            "params": [
-                dev_address,
-                {"limit": 50}
-            ]
-        }
-        response = await asyncio.to_thread(requests.post, HELIUS_RPC_URL, json=payload, headers={"Content-Type": "application/json"})
-        response.raise_for_status()
-        data = response.json()
-        transactions = data.get("result", [])
-        if not transactions:
-            print(f"Brak transakcji dla dev'a {dev_address}")
-            return None
-        oldest_tx = transactions[-1]
-        timestamp = oldest_tx.get("blockTime")
-        if timestamp:
-            return datetime.datetime.utcfromtimestamp(timestamp).replace(tzinfo=pytz.utc)
-        else:
-            print(f"Brak blockTime w transakcji dla {dev_address}")
-            return None
-    except Exception as e:
-        print(f"Błąd przy pobieraniu transakcji: {e}")
-        return None
+    attempts = 0
+    while attempts < 3:
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "helius",
+                "method": "getSignaturesForAddress",
+                "params": [dev_address, {"limit": 30}]  # ostatnie 30 transakcji
+            }
+            response = await asyncio.to_thread(
+                requests.post, HELIUS_RPC_URL, json=payload, headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            data = response.json()
 
-# Emoji na podstawie różnicy czasu
+            transactions = data.get("result", [])
+            if not transactions:
+                print(f"Brak transakcji dla dev'a {dev_address}")
+                return None
+
+            oldest_tx = transactions[-1]  # najstarsza z ostatnich 30
+            timestamp = oldest_tx.get("blockTime")
+            if timestamp:
+                return datetime.datetime.fromtimestamp(timestamp, datetime.UTC)
+            else:
+                print(f"Brak blockTime w transakcji dla {dev_address}")
+                return None
+
+        except Exception as e:
+            print(f"Błąd przy pobieraniu transakcji: {e}")
+            attempts += 1
+            await asyncio.sleep(1)
+    return None
+
 def get_emoji_for_time(token_creation_utc, oldest_tx_utc):
     if not token_creation_utc or not oldest_tx_utc:
         return ""
@@ -92,18 +104,21 @@ def get_emoji_for_time(token_creation_utc, oldest_tx_utc):
         return "🟫"
     return ""
 
-# Obsługa tokena
 async def handle_token(data):
     ca = data.get("mint")
     if not ca:
-        print("Brak CA, ignoruję.")
+        print(f"Brak CA, ignoruję.")
         return
 
     async with last_seen_cas_lock:
-        if ca in last_seen_cas:
+        if ca in last_seen_cas_set:
             print(f"Token {ca} już obsłużony. Ignoruję.")
             return
-        last_seen_cas.add(ca)
+        if len(last_seen_cas_queue) >= MAX_CAS:
+            oldest_ca = last_seen_cas_queue.popleft()
+            last_seen_cas_set.remove(oldest_ca)
+        last_seen_cas_queue.append(ca)
+        last_seen_cas_set.add(ca)
 
     print("\n--- NOWY TOKEN ---")
     print(json.dumps(data, indent=2))
@@ -113,17 +128,19 @@ async def handle_token(data):
     dev = data.get("traderPublicKey", "Brak dev'a")
 
     token_count = await get_token_count_by_creator(dev)
-    if token_count > 2:
-        print(f"Dev {dev} ma {token_count} tokenów. Ignoruję token.")
+    # Tylko jeśli dev ma mniej niż 1 token (czyli 0) sprawdzamy transakcje
+    if token_count >= 1:
+        print(f"Dev {dev} ma {token_count} tokenów (>=1). Ignoruję token.")
         return
 
-    display_count = 1 if token_count == 0 else token_count
+    display_count = token_count if token_count > 0 else 1
+
     initial_buy = data.get("initialBuy", 0)
     total_supply = 1_000_000_000
     initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
     formatted_initial_buy = f"{initial_buy_percentage:.2f}%"
 
-    token_creation_utc = datetime.datetime.utcnow().replace(tzinfo=pytz.utc)
+    token_creation_utc = datetime.datetime.now(datetime.UTC)
     token_creation_pl = token_creation_utc.astimezone(pytz.timezone("Europe/Warsaw"))
     formatted_timestamp = format_simple_datetime(token_creation_pl)
 
@@ -152,7 +169,6 @@ async def handle_token(data):
     await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown", disable_web_page_preview=True)
     print(f"Wysłano na Telegram: {name} ({symbol})")
 
-# Nasłuch na WebSocket
 async def listen_for_tokens():
     uri = "wss://pumpportal.fun/api/data"
     async with websockets.connect(uri) as websocket:
