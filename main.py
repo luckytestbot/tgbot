@@ -8,21 +8,17 @@ from telegram import Bot
 import os
 from collections import deque
 
-# Dane dostępowe z ustawionych zmiennych środowiskowych
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL")
 
-# Inicjalizacja bota Telegram
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Ustawienia limitu i struktur danych do obsługi CA
 MAX_CAS = 1000
 last_seen_cas_set = set()
 last_seen_cas_queue = deque(maxlen=MAX_CAS)
 last_seen_cas_lock = asyncio.Lock()
 
-# Cache devów i timestampów ostatniego sprawdzenia (adres dev -> datetime)
 dev_last_checked = {}
 dev_cache_lock = asyncio.Lock()
 CHECK_INTERVAL_SECONDS = 15 * 60  # 15 minut
@@ -40,7 +36,7 @@ async def get_token_count_by_creator(creator_address):
                 "creatorAddress": creator_address,
                 "onlyVerified": False,
                 "page": 1,
-                "limit": 50  # pobieramy max 50 tokenów
+                "limit": 50
             }
         }
         response = await asyncio.to_thread(
@@ -54,7 +50,6 @@ async def get_token_count_by_creator(creator_address):
         for asset in assets:
             if asset.get("interface") == "FungibleToken":
                 count += 1
-                # Logowanie dla debugu
                 print(f"Znaleziono token #{count} dla dev'a {creator_address}")
                 if count > 1:
                     return count
@@ -71,7 +66,7 @@ async def get_oldest_transaction_time(dev_address):
                 "jsonrpc": "2.0",
                 "id": "helius",
                 "method": "getSignaturesForAddress",
-                "params": [dev_address, {"limit": 30}]  # ostatnie 30 transakcji
+                "params": [dev_address, {"limit": 30}]
             }
             response = await asyncio.to_thread(
                 requests.post, HELIUS_RPC_URL, json=payload, headers={"Content-Type": "application/json"}
@@ -84,7 +79,7 @@ async def get_oldest_transaction_time(dev_address):
                 print(f"Brak transakcji dla dev'a {dev_address}")
                 return None
 
-            oldest_tx = transactions[-1]  # najstarsza z ostatnich 30
+            oldest_tx = transactions[-1]
             timestamp = oldest_tx.get("blockTime")
             if timestamp:
                 return datetime.datetime.fromtimestamp(timestamp, datetime.UTC)
@@ -135,17 +130,24 @@ async def handle_token(data):
     dev = data.get("traderPublicKey", "Brak dev'a")
 
     initial_buy = data.get("initialBuy", 0)
+    sol_amount = data.get("solAmount", 0)
     total_supply = 1_000_000_000
     initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
 
-    # Pomijamy dalszą obsługę jeśli initialBuy <= 1%
+    # Warunki filtrowania
+    is_close_to_integer = abs(initial_buy_percentage - round(initial_buy_percentage)) <= 0.02
+    is_sol_amount_close_to_integer = abs(sol_amount - round(sol_amount)) <= 0.02
+
+    if not (is_close_to_integer or is_sol_amount_close_to_integer):
+        print(f"Initial buy {initial_buy_percentage:.2f}% i solAmount {sol_amount:.2f} nie są bliskie liczbie całkowitej. Pomijam.")
+        return
+
     if initial_buy_percentage <= 1:
         print(f"Initial buy {initial_buy_percentage:.2f}% <= 1%. Pomijam sprawdzanie w Helius.")
         return
 
     now = datetime.datetime.now(datetime.UTC)
 
-    # Sprawdzamy cache devów - czy ostatnie sprawdzenie było < 15 minut temu
     async with dev_cache_lock:
         last_checked = dev_last_checked.get(dev)
         if last_checked and (now - last_checked).total_seconds() < CHECK_INTERVAL_SECONDS:
@@ -156,7 +158,6 @@ async def handle_token(data):
     token_count = await get_token_count_by_creator(dev)
     print(f"Dev {dev} ma {token_count} tokenów.")
 
-    # Sprawdzamy, czy dev ma mniej niż 1 token (czyli 0)
     if token_count >= 1:
         print(f"Dev {dev} ma {token_count} tokenów (>=1). Ignoruję token.")
         return
