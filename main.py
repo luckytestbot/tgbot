@@ -134,9 +134,9 @@ async def handle_token(data):
     total_supply = 1_000_000_000
     initial_buy_percentage = (initial_buy / total_supply) * 100 if initial_buy > 0 else 0
 
-    # Warunki filtrowania
-    is_close_to_integer = abs(initial_buy_percentage - round(initial_buy_percentage)) <= 0.02
-    is_sol_amount_close_to_integer = abs(sol_amount - round(sol_amount)) <= 0.02
+    # Warunki filtrowania – Tolerancja zwiększona do 5% (0.05)
+    is_close_to_integer = abs(initial_buy_percentage - round(initial_buy_percentage)) <= 0.05
+    is_sol_amount_close_to_integer = abs(sol_amount - round(sol_amount)) <= 0.05
 
     if not (is_close_to_integer or is_sol_amount_close_to_integer):
         print(f"Initial buy {initial_buy_percentage:.2f}% i solAmount {sol_amount:.2f} nie są bliskie liczbie całkowitej. Pomijam.")
